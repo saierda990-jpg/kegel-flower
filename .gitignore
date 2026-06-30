@@ -1,0 +1,17 @@
+.DS_Store
+.build/
+build/
+dist/
+*.xcuserstate
+*.xcuserdata/
+DerivedData/
+*.zip
+*.dmg
+*.tmp
+*.log
+DMG背景图候选打包/
+DMG背景图候选打包.zip
+DMG设计交接素材/
+DMG设计交接素材.zip
+图标方案/
+漫画背景候选图/
