@@ -30,7 +30,7 @@ Download the latest DMG from GitHub Releases:
 
 ## 安装 / Install
 
-1. 打开 `提肛小助手-mac.dmg`。
+1. 打开 `kegel-flower-mac.dmg`。
 2. 将 `提肛小助手.app` 拖进 `Applications`。
 3. 如果 macOS 提示无法验证，请右键 App 选择“打开”。
 4. 如果仍无法打开，可在终端执行：
@@ -39,7 +39,7 @@ Download the latest DMG from GitHub Releases:
 xattr -cr /Applications/提肛小助手.app
 ```
 
-1. Open `提肛小助手-mac.dmg`.
+1. Open `kegel-flower-mac.dmg`.
 2. Drag `提肛小助手.app` into `Applications`.
 3. If macOS blocks the app, right-click it and choose “Open”.
 4. If it still cannot open, run:
