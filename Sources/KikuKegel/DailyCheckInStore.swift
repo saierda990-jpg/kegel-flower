@@ -22,7 +22,12 @@ struct DailyCheckInSummary {
 }
 
 final class DailyCheckInStore {
-    static let slotCount = 15
+    static func slotCount(
+        for scheduleMode: ReminderScheduleMode,
+        reminderInterval: KegelReminderInterval = .fortyFive
+    ) -> Int {
+        scheduleMode.slotMinutes(interval: reminderInterval.minutes).count
+    }
 
     private let storageKey = "DailyCheckInRecords.v1"
     private let defaults: UserDefaults
@@ -33,9 +38,16 @@ final class DailyCheckInStore {
         self.records = Self.loadRecords(from: defaults, key: storageKey)
     }
 
-    func markCompletion(at date: Date = Date(), preferredSlotIndex: Int? = nil) -> Bool {
+    func markCompletion(
+        at date: Date = Date(),
+        preferredSlotIndex: Int? = nil,
+        scheduleMode: ReminderScheduleMode = .weekdays,
+        reminderInterval: KegelReminderInterval = .fortyFive
+    ) -> Bool {
         let key = dateKey(for: date)
-        let slotIndex = normalizedSlotIndex(preferredSlotIndex) ?? nearestSlotIndex(for: date)
+        let count = Self.slotCount(for: scheduleMode, reminderInterval: reminderInterval)
+        let slotIndex = normalizedSlotIndex(preferredSlotIndex, count: count)
+            ?? nearestSlotIndex(for: date, scheduleMode: scheduleMode, reminderInterval: reminderInterval)
         var slots = records[key, default: []]
 
         guard !slots.contains(slotIndex) else {
@@ -48,8 +60,12 @@ final class DailyCheckInStore {
         return true
     }
 
-    func nearestSlotIndex(for date: Date = Date()) -> Int {
-        let slots = slotDates(for: date)
+    func nearestSlotIndex(
+        for date: Date = Date(),
+        scheduleMode: ReminderScheduleMode = .weekdays,
+        reminderInterval: KegelReminderInterval = .fortyFive
+    ) -> Int {
+        let slots = slotDates(for: date, scheduleMode: scheduleMode, reminderInterval: reminderInterval)
         guard let firstSlot = slots.first, let lastSlot = slots.last else {
             return 0
         }
@@ -58,7 +74,7 @@ final class DailyCheckInStore {
             return 0
         }
         if date >= lastSlot {
-            return Self.slotCount - 1
+            return max(0, slots.count - 1)
         }
 
         var nearestIndex = 0
@@ -73,36 +89,41 @@ final class DailyCheckInStore {
         return nearestIndex
     }
 
-    func summary(for date: Date = Date()) -> DailyCheckInSummary {
+    func summary(
+        for date: Date = Date(),
+        scheduleMode: ReminderScheduleMode = .weekdays,
+        reminderInterval: KegelReminderInterval = .fortyFive
+    ) -> DailyCheckInSummary {
         let todayKey = dateKey(for: date)
         let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: date) ?? date
         let yesterdayKey = dateKey(for: yesterday)
         let todaySlots = records[todayKey, default: []]
         let yesterdaySlots = records[yesterdayKey, default: []]
-        let completedSlots = (0..<Self.slotCount).map { todaySlots.contains($0) }
+        let count = Self.slotCount(for: scheduleMode, reminderInterval: reminderInterval)
+        let completedSlots = (0..<count).map { todaySlots.contains($0) }
 
         return DailyCheckInSummary(
             completedSlots: completedSlots,
-            todayCount: todaySlots.count,
-            yesterdayCount: yesterdaySlots.count
+            todayCount: todaySlots.filter { $0 < count }.count,
+            yesterdayCount: yesterdaySlots.filter { $0 < count }.count
         )
     }
 
-    private func slotDates(for date: Date) -> [Date] {
+    private func slotDates(
+        for date: Date,
+        scheduleMode: ReminderScheduleMode,
+        reminderInterval: KegelReminderInterval
+    ) -> [Date] {
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: date)
-        guard let firstSlot = calendar.date(byAdding: .hour, value: 9, to: startOfDay) else {
-            return []
-        }
-
-        return (0..<Self.slotCount).compactMap { index in
-            calendar.date(byAdding: .minute, value: index * 45, to: firstSlot)
+        return scheduleMode.slotMinutes(interval: reminderInterval.minutes).compactMap { minute in
+            calendar.date(byAdding: .minute, value: minute, to: startOfDay)
         }
     }
 
-    private func normalizedSlotIndex(_ index: Int?) -> Int? {
+    private func normalizedSlotIndex(_ index: Int?, count: Int) -> Int? {
         guard let index else { return nil }
-        return min(max(index, 0), Self.slotCount - 1)
+        return min(max(index, 0), max(0, count - 1))
     }
 
     private func dateKey(for date: Date) -> String {
@@ -130,7 +151,7 @@ final class DailyCheckInStore {
         }
 
         return decoded.mapValues { indexes in
-            Set(indexes.filter { 0..<Self.slotCount ~= $0 })
+            Set(indexes.filter { 0..<64 ~= $0 })
         }
     }
 }

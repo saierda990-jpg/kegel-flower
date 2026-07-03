@@ -34,11 +34,13 @@ final class StatusCoordinator: NSObject {
     private let statusItem = NSStatusBar.system.statusItem(withLength: 24)
     private let session = KegelSession()
     private let popover = NSPopover()
+    private let actionPopover = NSPopover()
     private let reminderToast = ToastBubbleWindow()
     private let checkInStore = DailyCheckInStore()
     private let petStatusStore = PetStatusStore()
     private let settings = KikuKegelSettingsStore()
     private let updateChecker = GitHubUpdateChecker()
+    private let popoverNoticeStore = PopoverNoticeStore()
     private let riceFeedAnimationWindow = RiceFeedAnimationWindow()
     private let petNeedBubbleWindow = PetNeedBubbleWindow()
     private let fedPetNeedStorageKey = "PetNeeds.fed.v1"
@@ -77,6 +79,8 @@ final class StatusCoordinator: NSObject {
     private var lastHungryToastNeedKey: String?
     private var demoPetNeedIndex = 0
     private var eatAnimationStartDate: Date?
+    private var feedingOverlayIcon: String?
+    private var feedingOverlayStartDate: Date?
     private var nextSleepAt = Date()
     private var sleepStartDate: Date?
     private var sleepEndDate: Date?
@@ -85,6 +89,9 @@ final class StatusCoordinator: NSObject {
     private var postWakeBlinkEndDate: Date?
     private var updateAvailableInfo: AppUpdateInfo?
     private var isCheckingForUpdates = false
+    private var isUpdateBadgeDemoMode: Bool {
+        ProcessInfo.processInfo.environment["KIKU_UPDATE_BADGE_DEMO"] == "1"
+    }
     private var cancellables = Set<AnyCancellable>()
 
     override init() {
@@ -97,16 +104,22 @@ final class StatusCoordinator: NSObject {
             self?.feedRice()
         }
         configureStatusItem()
-        configureOverlayTestStatusItemIfNeeded()
         configurePopover()
+        configureActionPopover()
         configureReminderToast()
         bindSession()
+        applyReminderSettings()
         session.start()
         scheduleNextSleep()
         startEyeLoop()
         refreshCachedUpdateInfo()
+        configureUpdateDemoIfNeeded()
         refreshUpdateStatusIfNeeded()
-        if isToastDemoMode {
+        if isFeedingOverlayDemoMode {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
+                self?.runFeedingOverlayDemo()
+            }
+        } else if isToastDemoMode {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) { [weak self] in
                 if ProcessInfo.processInfo.environment["TOAST_DEMO_REMINDER_ONLY"] == "1" {
                     self?.runReminderToastDemo()
@@ -154,6 +167,7 @@ final class StatusCoordinator: NSObject {
             rootView: ExercisePopoverView(
                     session: session,
                     petStatusStore: petStatusStore,
+                    noticeStore: popoverNoticeStore,
                     iconStyle: { [weak self] in self?.iconStyle ?? .fourPetal },
                     petStatus: { [weak self] in
                         self?.petStatusSnapshot() ?? PetStatusSnapshot(
@@ -166,7 +180,7 @@ final class StatusCoordinator: NSObject {
                             toiletHint: "如厕还--分钟",
                             activityHint: "活动还--分钟",
                             hydrationDetail: "0/2000ml",
-                            exerciseDetail: "0/\(DailyCheckInStore.slotCount)",
+                            exerciseDetail: "0/\(DailyCheckInStore.slotCount(for: self?.settings.reminderScheduleMode ?? .weekdays, reminderInterval: self?.settings.kegelReminderInterval ?? .fortyFive))",
                             level: 1,
                             experience: 0,
                             moodText: "需要照顾一下"
@@ -183,6 +197,11 @@ final class StatusCoordinator: NSObject {
         controller.view.wantsLayer = true
         controller.view.layer?.backgroundColor = NSColor.clear.cgColor
         popover.contentViewController = controller
+    }
+
+    private func configureActionPopover() {
+        actionPopover.behavior = .transient
+        actionPopover.delegate = self
     }
 
     private func configureReminderToast() {
@@ -271,7 +290,6 @@ final class StatusCoordinator: NSObject {
 
     private func feedPetNeed(_ need: PetNeed) {
         guard !isRiceFeeding else { return }
-        let startCenter = petNeedScreenCenter() ?? reminderToast.centerOnScreen
         guard let rect = statusItemScreenRect() else {
             isRiceVisible = false
             refreshStatusText()
@@ -287,9 +305,8 @@ final class StatusCoordinator: NSObject {
         isRiceVisible = false
         hidePetNeedBubble()
         refreshStatusText()
-        let animationStartCenter = startCenter ?? CGPoint(x: rect.minX - 10, y: rect.midY - 1)
-        let endCenter = statusIconScreenCenter() ?? CGPoint(x: rect.minX + 9, y: rect.midY)
-        riceFeedAnimationWindow.play(icon: need.icon, from: animationStartCenter, to: endCenter) { [weak self] in
+        _ = rect
+        playInPlaceFeeding(icon: need.icon) { [weak self] in
             self?.finishPetNeedFlight()
         }
     }
@@ -310,6 +327,11 @@ final class StatusCoordinator: NSObject {
             self?.nextAmbientToastAllowedAt = Date().addingTimeInterval(self?.ambientAfterPetNeedDelay ?? 5 * 60)
             self?.lastHungryToastNeedKey = nil
             self?.refreshStatusText()
+            if self?.isFeedingOverlayDemoMode == true {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    self?.runFeedingOverlayDemo()
+                }
+            }
         }
     }
 
@@ -318,7 +340,12 @@ final class StatusCoordinator: NSObject {
         hideReminderToast()
         suppressPetNeedDuringExercise()
         stopIconAnimation()
-        if !isAnyDemoMode, checkInStore.markCompletion(preferredSlotIndex: pendingCheckInSlotIndex) {
+        if !isAnyDemoMode,
+           checkInStore.markCompletion(
+            preferredSlotIndex: pendingCheckInSlotIndex,
+            scheduleMode: settings.reminderScheduleMode,
+            reminderInterval: settings.kegelReminderInterval
+           ) {
             petStatusStore.recordExercise()
         }
         pendingCheckInSlotIndex = nil
@@ -327,7 +354,14 @@ final class StatusCoordinator: NSObject {
     }
 
     private func petStatusSnapshot() -> PetStatusSnapshot {
-        petStatusStore.snapshot(todayExerciseCount: checkInStore.summary().todayCount)
+        let summary = checkInStore.summary(
+            scheduleMode: settings.reminderScheduleMode,
+            reminderInterval: settings.kegelReminderInterval
+        )
+        return petStatusStore.snapshot(
+            todayExerciseCount: summary.todayCount,
+            exerciseSlotCount: summary.totalCount
+        )
     }
 
     private func feedPetFromPopover() -> String? {
@@ -371,7 +405,7 @@ final class StatusCoordinator: NSObject {
             }
         }
 
-        guard let rect = statusItemScreenRect() else {
+        guard statusItemScreenRect() != nil else {
             if !recordImmediately {
                 _ = recordPetCare(kind: kind)
             }
@@ -387,12 +421,23 @@ final class StatusCoordinator: NSObject {
         hidePetNeedBubble()
         refreshStatusText()
 
-        let endCenter = statusIconScreenCenter() ?? CGPoint(x: rect.midX, y: rect.midY)
-        let startCenter = CGPoint(x: endCenter.x - 36, y: endCenter.y - 1)
-        riceFeedAnimationWindow.play(icon: icon, from: startCenter, to: endCenter) { [weak self] in
+        playInPlaceFeeding(icon: icon) { [weak self] in
             self?.finishPetCare(kind: kind, alreadyRecorded: recordImmediately)
         }
         return nil
+    }
+
+    private func playInPlaceFeeding(icon: String, completion: @escaping () -> Void) {
+        feedingOverlayIcon = icon
+        feedingOverlayStartDate = Date()
+        refreshStatusText()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + feedingOverlayDuration) { [weak self] in
+            self?.feedingOverlayIcon = nil
+            self?.feedingOverlayStartDate = nil
+            self?.refreshStatusText()
+            completion()
+        }
     }
 
     private func finishPetCare(kind: PetCareKind, alreadyRecorded: Bool = false) {
@@ -430,6 +475,7 @@ final class StatusCoordinator: NSObject {
         if popover.isShown {
             popover.close()
         } else {
+            actionPopover.close()
             pauseVisibleToastForPopover()
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
@@ -438,6 +484,8 @@ final class StatusCoordinator: NSObject {
     }
 
     private func showContextMenu() {
+        refreshUpdateStatusIfNeeded()
+
         let menu = NSMenu()
 
         addCheckInItems(to: menu)
@@ -451,17 +499,10 @@ final class StatusCoordinator: NSObject {
         snooze.target = self
         menu.addItem(snooze)
 
-        let styleItem = NSMenuItem(title: "更换图形", action: nil, keyEquivalent: "")
-        let styleMenu = NSMenu()
-        for style in FlowerIconStyle.allCases {
-            let item = NSMenuItem(title: style.rawValue, action: #selector(selectStyle(_:)), keyEquivalent: "")
-            item.target = self
-            item.representedObject = style.rawValue
-            item.state = style == iconStyle ? .on : .off
-            styleMenu.addItem(item)
-        }
-        styleItem.submenu = styleMenu
-        menu.addItem(styleItem)
+        let disableToday = NSMenuItem(title: "今天不再提醒", action: #selector(disableRemindersForTodayFromMenu), keyEquivalent: "")
+        disableToday.target = self
+        disableToday.state = settings.areRemindersDisabledToday ? .on : .off
+        menu.addItem(disableToday)
 
         let settingsItem = NSMenuItem(title: "设置", action: nil, keyEquivalent: "")
         settingsItem.submenu = settingsMenu()
@@ -470,9 +511,11 @@ final class StatusCoordinator: NSObject {
         menu.addItem(.separator())
         menu.addItem(rewardMenuItem())
 
-        let version = NSMenuItem(title: "版本 \(appVersion)", action: nil, keyEquivalent: "")
-        version.isEnabled = false
-        menu.addItem(version)
+        menu.addItem(versionMenuItem())
+
+        let restart = NSMenuItem(title: "重启插件", action: #selector(restartPlugin), keyEquivalent: "")
+        restart.target = self
+        menu.addItem(restart)
 
         let quit = NSMenuItem(title: "退出", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
@@ -516,34 +559,77 @@ final class StatusCoordinator: NSObject {
         popupReminders.state = settings.popupRemindersEnabled ? .on : .off
         menu.addItem(popupReminders)
 
-        menu.addItem(.separator())
-
-        let updateItem = NSMenuItem(
-            title: isCheckingForUpdates ? "正在检查更新..." : "检查更新",
-            action: #selector(checkForUpdatesFromMenu),
+        let easterEggReminders = NSMenuItem(
+            title: "彩蛋提醒",
+            action: #selector(toggleEasterEggReminders(_:)),
             keyEquivalent: ""
         )
-        updateItem.target = self
-        updateItem.isEnabled = !isCheckingForUpdates
-        if updateAvailableInfo != nil {
-            updateItem.attributedTitle = updateMenuAttributedTitle()
+        easterEggReminders.target = self
+        easterEggReminders.state = settings.easterEggRemindersEnabled ? .on : .off
+        menu.addItem(easterEggReminders)
+
+        let intervalItem = NSMenuItem(title: "提肛提醒间隔", action: nil, keyEquivalent: "")
+        let intervalMenu = NSMenu()
+        for interval in KegelReminderInterval.allCases {
+            let item = NSMenuItem(title: interval.title, action: #selector(selectKegelReminderInterval(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = interval.rawValue
+            item.state = interval == settings.kegelReminderInterval ? .on : .off
+            intervalMenu.addItem(item)
         }
-        menu.addItem(updateItem)
+        intervalItem.submenu = intervalMenu
+        menu.addItem(intervalItem)
+
+        let scheduleItem = NSMenuItem(title: "提醒时段", action: nil, keyEquivalent: "")
+        let scheduleMenu = NSMenu()
+        for mode in ReminderScheduleMode.allCases {
+            let item = NSMenuItem(title: mode.title, action: #selector(selectReminderScheduleMode(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = mode.rawValue
+            item.state = mode == settings.reminderScheduleMode ? .on : .off
+            scheduleMenu.addItem(item)
+        }
+        scheduleItem.submenu = scheduleMenu
+        menu.addItem(scheduleItem)
 
         return menu
     }
 
+    private func versionMenuItem() -> NSMenuItem {
+        if let updateAvailableInfo {
+            let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+            item.view = VersionMenuItemView(
+                version: appVersion,
+                updateVersion: updateAvailableInfo.version,
+                action: { [weak self] in
+                    self?.checkForUpdatesFromMenu()
+                }
+            )
+            return item
+        }
+
+        let title = isCheckingForUpdates ? "版本 \(appVersion)（检查中...）" : "版本 \(appVersion)"
+        let item = NSMenuItem(
+            title: title,
+            action: #selector(checkForUpdatesFromMenu),
+            keyEquivalent: ""
+        )
+        item.target = self
+        item.isEnabled = !isCheckingForUpdates
+        return item
+    }
+
     private func rewardQRCodeView() -> NSView {
-        let container = NSView(frame: CGRect(x: 0, y: 0, width: 260, height: 284))
+        let container = NSView(frame: CGRect(x: 0, y: 0, width: 260, height: 312))
 
         let title = NSTextField(labelWithString: "微信扫码赞赏")
         title.alignment = .center
         title.font = .systemFont(ofSize: 13, weight: .semibold)
         title.textColor = .labelColor
-        title.frame = CGRect(x: 0, y: 252, width: 260, height: 20)
+        title.frame = CGRect(x: 0, y: 280, width: 260, height: 20)
         container.addSubview(title)
 
-        let imageView = NSImageView(frame: CGRect(x: 20, y: 20, width: 220, height: 220))
+        let imageView = NSImageView(frame: CGRect(x: 20, y: 48, width: 220, height: 220))
         imageView.imageScaling = .scaleProportionallyUpOrDown
         imageView.wantsLayer = true
         imageView.layer?.cornerRadius = 8
@@ -551,6 +637,18 @@ final class StatusCoordinator: NSObject {
         imageView.image = Bundle.main.url(forResource: "WeChatReward", withExtension: "png")
             .flatMap(NSImage.init(contentsOf:))
         container.addSubview(imageView)
+
+        let contactIcon = NSImageView(frame: CGRect(x: 34, y: 17, width: 16, height: 16))
+        contactIcon.image = Bundle.main.url(forResource: "WeChatIcon", withExtension: "png")
+            .flatMap(NSImage.init(contentsOf:))
+        contactIcon.imageScaling = .scaleProportionallyUpOrDown
+        container.addSubview(contactIcon)
+
+        let contact = NSTextField(labelWithString: "交流学习  wechat:saierda997")
+        contact.font = .systemFont(ofSize: 12, weight: .medium)
+        contact.textColor = .secondaryLabelColor
+        contact.frame = CGRect(x: 56, y: 14, width: 180, height: 20)
+        container.addSubview(contact)
 
         return container
     }
@@ -569,23 +667,29 @@ final class StatusCoordinator: NSObject {
         session.snooze(minutes: 10)
     }
 
+    @objc private func disableRemindersForTodayFromMenu() {
+        settings.disableRemindersForToday()
+        clearPendingToasts()
+        hideReminderToast()
+        hidePetNeedBubble()
+        currentPetNeed = nil
+        isRiceVisible = false
+        petNeedWiggleStartDate = nil
+        lastHungryToastNeedKey = nil
+        let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date().addingTimeInterval(24 * 60 * 60)
+        let nextActiveStart = settings.reminderScheduleMode.nextActiveStart(
+            after: Calendar.current.startOfDay(for: tomorrow).addingTimeInterval(-1)
+        )
+        session.pauseReminders(until: nextActiveStart)
+        refreshStatusText()
+    }
+
     private func snoozeFromPopover() {
         hideReminderToast()
         nextPetNeedToastAllowedAt = Date().addingTimeInterval(45)
         nextAmbientToastAllowedAt = Date().addingTimeInterval(90)
         session.snooze(minutes: 10)
         popover.close()
-    }
-
-    @objc private func selectStyle(_ item: NSMenuItem) {
-        guard
-            let value = item.representedObject as? String,
-            let style = FlowerIconStyle(rawValue: value)
-        else { return }
-
-        iconStyle = style
-        UserDefaults.standard.set(style.rawValue, forKey: "FlowerIconStyle")
-        refreshStatusText()
     }
 
     @objc private func toggleLaunchAtLogin(_ item: NSMenuItem) {
@@ -608,6 +712,62 @@ final class StatusCoordinator: NSObject {
         }
     }
 
+    @objc private func toggleEasterEggReminders(_ item: NSMenuItem) {
+        settings.easterEggRemindersEnabled.toggle()
+        item.state = settings.easterEggRemindersEnabled ? .on : .off
+
+        if !settings.easterEggRemindersEnabled {
+            clearPendingToasts()
+            hidePetNeedBubble()
+            currentPetNeed = nil
+            isRiceVisible = false
+            petNeedWiggleStartDate = nil
+            lastHungryToastNeedKey = nil
+            feedingOverlayIcon = nil
+            feedingOverlayStartDate = nil
+            refreshStatusText()
+        }
+    }
+
+    @objc private func selectReminderScheduleMode(_ item: NSMenuItem) {
+        guard
+            let rawValue = item.representedObject as? String,
+            let mode = ReminderScheduleMode(rawValue: rawValue)
+        else { return }
+
+        settings.reminderScheduleMode = mode
+        applyReminderSettings()
+        refreshStatusText()
+    }
+
+    @objc private func selectKegelReminderInterval(_ item: NSMenuItem) {
+        guard
+            let rawValue = item.representedObject as? Int,
+            let interval = KegelReminderInterval(rawValue: rawValue)
+        else { return }
+
+        settings.kegelReminderInterval = interval
+        applyReminderSettings()
+        refreshStatusText()
+    }
+
+    private func applyReminderSettings() {
+        session.applyReminderInterval(settings.kegelReminderInterval)
+        applyReminderScheduleMode(settings.reminderScheduleMode)
+    }
+
+    private func applyReminderScheduleMode(_ mode: ReminderScheduleMode) {
+        session.applyScheduleMode(mode)
+        petStatusStore.applyScheduleMode(mode)
+        if !mode.isActive(at: Date()) {
+            clearPendingToasts()
+            hideReminderToast()
+            hidePetNeedBubble()
+            petNeedWiggleStartDate = nil
+            lastHungryToastNeedKey = nil
+        }
+    }
+
     @objc private func checkForUpdatesFromMenu() {
         refreshUpdateStatus(force: true, notify: true)
     }
@@ -616,9 +776,27 @@ final class StatusCoordinator: NSObject {
         NSApp.terminate(nil)
     }
 
+    @objc private func restartPlugin() {
+        let appPath = Bundle.main.bundleURL.path
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "sleep 0.4; open \"\(appPath)\""]
+        try? process.run()
+        NSApp.terminate(nil)
+    }
+
     private func showReminderToast() {
-        pendingCheckInSlotIndex = checkInStore.nearestSlotIndex()
-        guard settings.popupRemindersEnabled else {
+        guard !settings.areRemindersDisabledToday else {
+            hideReminderToast()
+            return
+        }
+        pendingCheckInSlotIndex = checkInStore.nearestSlotIndex(
+            scheduleMode: settings.reminderScheduleMode,
+            reminderInterval: settings.kegelReminderInterval
+        )
+        guard settings.popupRemindersEnabled,
+              settings.easterEggRemindersEnabled,
+              !settings.areRemindersDisabledToday else {
             return
         }
         let reminderMessage = currentReminderMessage()
@@ -662,7 +840,11 @@ final class StatusCoordinator: NSObject {
     }
 
     private func currentReminderMessage(at date: Date = Date()) -> (title: String, subtitle: String) {
-        let summary = checkInStore.summary(for: date)
+        let summary = checkInStore.summary(
+            for: date,
+            scheduleMode: settings.reminderScheduleMode,
+            reminderInterval: settings.kegelReminderInterval
+        )
         if shouldShowSurpassYesterdayPrompt(summary: summary, at: date) {
             return ("再运动一次就超过昨天的记录啦", "")
         }
@@ -685,7 +867,9 @@ final class StatusCoordinator: NSObject {
     }
 
     private func showStartupToast() {
-        guard settings.popupRemindersEnabled else {
+        guard settings.popupRemindersEnabled,
+              settings.easterEggRemindersEnabled,
+              !settings.areRemindersDisabledToday else {
             return
         }
         guard !reminderToast.isShown, session.mode != .reminding else {
@@ -849,7 +1033,10 @@ final class StatusCoordinator: NSObject {
 
     private func runReminderToastDemo() {
         reminderStartDate = Date()
-        pendingCheckInSlotIndex = checkInStore.nearestSlotIndex()
+        pendingCheckInSlotIndex = checkInStore.nearestSlotIndex(
+            scheduleMode: settings.reminderScheduleMode,
+            reminderInterval: settings.kegelReminderInterval
+        )
         showToast(
             title: "时间到",
             subtitle: "",
@@ -861,6 +1048,18 @@ final class StatusCoordinator: NSObject {
             secondaryButtonTitle: "稍后",
             secondaryAction: { [weak self] in self?.snoozeFromReminderToast() }
         )
+    }
+
+    private func runFeedingOverlayDemo() {
+        let need = PetNeed(
+            key: "demo.overlay.food.\(ProcessInfo.processInfo.processIdentifier).\(Date().timeIntervalSince1970)",
+            icon: "🍚",
+            title: "饿了...",
+            kind: .food
+        )
+        currentPetNeed = need
+        petNeedWiggleStartDate = Date()
+        showHungryToastIfNeeded(for: need)
     }
 
     private func showToast(
@@ -894,12 +1093,86 @@ final class StatusCoordinator: NSObject {
             timeoutAction: timeoutAction
         )
 
-        guard !popover.isShown, !reminderToast.isShown, toastSequenceTimer == nil else {
+        guard !popover.isShown, !actionPopover.isShown, !reminderToast.isShown, toastSequenceTimer == nil else {
             enqueueToast(toast)
             return
         }
 
         presentToast(toast)
+    }
+
+    private func presentPopoverToast(_ toast: PendingToast) {
+        guard let button = statusItem.button else { return }
+        activeToast = toast
+        toastDismissTimer?.invalidate()
+        toastDismissTimer = nil
+        reminderToast.hide()
+        popover.close()
+
+        let controller = NSHostingController(
+            rootView: ReminderToastView(
+                title: toast.title,
+                subtitle: toast.subtitle,
+                systemImageName: toast.systemImageName,
+                layout: toast.layout,
+                action: { [weak self] in
+                    self?.handlePopoverToastAction(
+                        toast.action,
+                        keepPopoverOpen: self?.isExerciseReminderToast(toast) == true
+                    )
+                },
+                primaryButtonTitle: toast.primaryButtonTitle,
+                primaryAction: { [weak self] in
+                    self?.handlePopoverToastAction(
+                        toast.primaryAction,
+                        keepPopoverOpen: self?.isExerciseReminderToast(toast) == true
+                    )
+                },
+                secondaryButtonTitle: toast.secondaryButtonTitle,
+                secondaryAction: { [weak self] in
+                    self?.handlePopoverToastAction(toast.secondaryAction, keepPopoverOpen: false)
+                },
+                showsArrow: false
+            )
+        )
+        controller.view.wantsLayer = true
+        controller.view.layer?.backgroundColor = NSColor.clear.cgColor
+
+        actionPopover.contentSize = actionPopoverSize(for: toast)
+        actionPopover.contentViewController = controller
+
+        NSApp.activate(ignoringOtherApps: true)
+        if !actionPopover.isShown {
+            actionPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            applyNativePopoverChrome(to: actionPopover)
+        }
+    }
+
+    private func actionPopoverSize(for toast: PendingToast) -> NSSize {
+        if toast.layout == .petAction {
+            return NSSize(width: 96, height: 101)
+        }
+
+        if toast.primaryButtonTitle != nil {
+            let titleWidth = CGFloat(toast.title.count) * 13 + 34
+            return NSSize(width: min(220, max(167, titleWidth)), height: 77)
+        }
+
+        let titleWidth = CGFloat(toast.title.count) * 11 + 25
+        let subtitleWidth = toast.subtitle.isEmpty ? 0 : CGFloat(toast.subtitle.count) * 8 + 27
+        let bodyWidth = min(155, max(76, max(titleWidth, subtitleWidth) * 1.16))
+        let bodyHeight: CGFloat = toast.subtitle.isEmpty ? 34 : 44
+        return NSSize(width: bodyWidth, height: bodyHeight + 6)
+    }
+
+    private func handlePopoverToastAction(_ action: (() -> Void)?, keepPopoverOpen: Bool) {
+        activeToast = nil
+        popoverNoticeStore.notice = nil
+        action?()
+        if !keepPopoverOpen {
+            actionPopover.close()
+        }
+        showNextPendingToastIfPossible()
     }
 
     private func enqueueToast(_ toast: PendingToast) {
@@ -972,14 +1245,14 @@ final class StatusCoordinator: NSObject {
     }
 
     private func showNextPendingToastIfPossible() {
-        guard !popover.isShown, !reminderToast.isShown, !pendingToasts.isEmpty, toastSequenceTimer == nil else {
+        guard !popover.isShown, !actionPopover.isShown, !reminderToast.isShown, !pendingToasts.isEmpty, toastSequenceTimer == nil else {
             return
         }
 
         toastSequenceTimer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: false) { [weak self] _ in
             guard let self else { return }
             self.toastSequenceTimer = nil
-            guard !self.popover.isShown, !self.reminderToast.isShown, !self.pendingToasts.isEmpty else {
+            guard !self.popover.isShown, !self.actionPopover.isShown, !self.reminderToast.isShown, !self.pendingToasts.isEmpty else {
                 return
             }
 
@@ -1008,7 +1281,7 @@ final class StatusCoordinator: NSObject {
     }
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.6"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.7"
     }
 
     private func refreshCachedUpdateInfo() {
@@ -1030,7 +1303,22 @@ final class StatusCoordinator: NSObject {
         )
     }
 
+    private func configureUpdateDemoIfNeeded() {
+        guard isUpdateBadgeDemoMode else {
+            return
+        }
+
+        updateAvailableInfo = AppUpdateInfo(
+            version: "0.2.8",
+            url: URL(string: "https://github.com/saierda990-jpg/kegel-flower/releases")!,
+            title: "v0.2.8",
+            notes: nil
+        )
+    }
+
     private func refreshUpdateStatusIfNeeded() {
+        guard !isUpdateBadgeDemoMode else { return }
+
         if let lastCheck = settings.lastUpdateCheckAt,
            Date().timeIntervalSince(lastCheck) < 30 * 60 {
             return
@@ -1040,6 +1328,13 @@ final class StatusCoordinator: NSObject {
     }
 
     private func refreshUpdateStatus(force: Bool, notify: Bool) {
+        if isUpdateBadgeDemoMode {
+            if notify, let updateAvailableInfo {
+                showUpdateAvailableAlert(updateAvailableInfo)
+            }
+            return
+        }
+
         guard !isCheckingForUpdates else { return }
         guard force || settings.popupRemindersEnabled || settings.lastUpdateCheckAt == nil else { return }
 
@@ -1072,30 +1367,12 @@ final class StatusCoordinator: NSObject {
         }
     }
 
-    private func updateMenuAttributedTitle() -> NSAttributedString {
-        let title = NSMutableAttributedString(
-            string: "检查更新  ",
-            attributes: [
-                .font: NSFont.menuFont(ofSize: 0),
-                .foregroundColor: NSColor.labelColor
-            ]
-        )
-        title.append(NSAttributedString(
-            string: "●",
-            attributes: [
-                .font: NSFont.menuFont(ofSize: 0),
-                .foregroundColor: NSColor.systemRed
-            ]
-        ))
-        return title
-    }
-
     private func showUpdateAvailableAlert(_ info: AppUpdateInfo) {
         let alert = NSAlert()
-        alert.messageText = "发现新版本 / Update Available"
-        alert.informativeText = "当前版本 \(appVersion)，最新版本 \(info.version)。\nCurrent: \(appVersion), latest: \(info.version)."
-        alert.addButton(withTitle: "前往下载 / Download")
-        alert.addButton(withTitle: "稍后 / Later")
+        alert.messageText = "发现新版本"
+        alert.informativeText = "当前版本 \(appVersion)，最新版本 \(info.version)。"
+        alert.addButton(withTitle: "前往下载")
+        alert.addButton(withTitle: "稍后")
 
         if alert.runModal() == .alertFirstButtonReturn {
             NSWorkspace.shared.open(info.url)
@@ -1104,17 +1381,17 @@ final class StatusCoordinator: NSObject {
 
     private func showNoUpdatesAlert() {
         let alert = NSAlert()
-        alert.messageText = "已经是最新版本 / You're Up to Date"
-        alert.informativeText = "当前版本 \(appVersion) 已是最新。\nVersion \(appVersion) is the latest available version."
-        alert.addButton(withTitle: "好 / OK")
+        alert.messageText = "已经是最新版本"
+        alert.informativeText = "当前版本 \(appVersion) 已是最新。"
+        alert.addButton(withTitle: "好")
         alert.runModal()
     }
 
     private func showUpdateCheckFailedAlert(_ message: String) {
         let alert = NSAlert()
-        alert.messageText = "暂时无法检查更新 / Could Not Check Updates"
-        alert.informativeText = "\(message)\n请稍后再试，或前往 GitHub 查看最新版本。\nPlease try again later, or check the latest version on GitHub."
-        alert.addButton(withTitle: "好 / OK")
+        alert.messageText = "暂时无法检查更新"
+        alert.informativeText = "\(message)\n请稍后再试，或前往 GitHub 查看最新版本。"
+        alert.addButton(withTitle: "好")
         alert.runModal()
     }
 
@@ -1125,6 +1402,7 @@ final class StatusCoordinator: NSObject {
         toastDismissTimer?.invalidate()
         toastDismissTimer = nil
         activeToast = nil
+        popoverNoticeStore.notice = nil
         if shouldStopReminderWiggle {
             reminderStartDate = nil
         }
@@ -1132,42 +1410,14 @@ final class StatusCoordinator: NSObject {
     }
 
     private func addCheckInItems(to menu: NSMenu) {
-        let summary = checkInStore.summary()
+        let summary = checkInStore.summary(
+            scheduleMode: settings.reminderScheduleMode,
+            reminderInterval: settings.kegelReminderInterval
+        )
 
-        let titleItem = NSMenuItem(title: "今日打卡 \(summary.todayCount)/\(summary.totalCount)", action: nil, keyEquivalent: "")
-        titleItem.isEnabled = false
-        menu.addItem(titleItem)
-
-        let dotsItem = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        dotsItem.attributedTitle = checkInDotsTitle(for: summary.completedSlots)
-        dotsItem.isEnabled = false
-        menu.addItem(dotsItem)
-
-        let comparisonItem = NSMenuItem(title: summary.comparisonText, action: nil, keyEquivalent: "")
-        comparisonItem.isEnabled = false
-        menu.addItem(comparisonItem)
-    }
-
-    private func checkInDotsTitle(for completedSlots: [Bool]) -> NSAttributedString {
-        let result = NSMutableAttributedString()
-        let font = NSFont.systemFont(ofSize: 13, weight: .semibold)
-        for (index, isCompleted) in completedSlots.enumerated() {
-            if index > 0 {
-                result.append(NSAttributedString(string: " "))
-            }
-
-            let color = isCompleted ? NSColor.systemGreen : NSColor.tertiaryLabelColor
-            result.append(
-                NSAttributedString(
-                    string: "●",
-                    attributes: [
-                        .font: font,
-                        .foregroundColor: color
-                    ]
-                )
-            )
-        }
-        return result
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        item.view = CheckInMenuHeaderView(summary: summary)
+        menu.addItem(item)
     }
 
     private func snoozeFromReminderToast() {
@@ -1210,6 +1460,7 @@ final class StatusCoordinator: NSObject {
         } else if iconAnimationTimer == nil {
             button.image = statusImage()
         }
+        repositionReminderToastIfNeeded()
     }
 
     private func renderExercisePulseIcon() {
@@ -1258,6 +1509,12 @@ final class StatusCoordinator: NSObject {
         if iconAnimationTimer == nil && session.mode != .exercising {
             statusItem.button?.image = statusImage()
         }
+        repositionReminderToastIfNeeded()
+    }
+
+    private func repositionReminderToastIfNeeded() {
+        guard reminderToast.isShown, let statusRect = statusItemScreenRect() else { return }
+        reminderToast.reposition(near: statusRect)
     }
 
     private func updateRiceVisibilityForHover() {
@@ -1265,7 +1522,7 @@ final class StatusCoordinator: NSObject {
             return
         }
 
-        guard settings.popupRemindersEnabled else {
+        guard settings.popupRemindersEnabled, !settings.areRemindersDisabledToday else {
             let shouldRefresh = isRiceVisible || petNeedBubbleWindow.isVisible || petNeedWiggleStartDate != nil
             isRiceVisible = false
             currentPetNeed = nil
@@ -1327,7 +1584,7 @@ final class StatusCoordinator: NSObject {
     }
 
     private func updatePetNeedBubble() {
-        guard settings.popupRemindersEnabled else {
+        guard settings.popupRemindersEnabled, !settings.areRemindersDisabledToday else {
             hidePetNeedBubble()
             return
         }
@@ -1340,6 +1597,10 @@ final class StatusCoordinator: NSObject {
     }
 
     private func activePetNeed(at date: Date = Date()) -> PetNeed? {
+        guard settings.easterEggRemindersEnabled else {
+            return nil
+        }
+
         if ProcessInfo.processInfo.environment["PET_NEED_DEMO_SEQUENCE"] == "1" {
             let demoNeeds = [
                 PetNeed(key: "demo.meal.\(ProcessInfo.processInfo.processIdentifier)", icon: "🍚", title: "饿了...", kind: .food),
@@ -1350,11 +1611,19 @@ final class StatusCoordinator: NSObject {
             return demoNeeds[demoPetNeedIndex]
         }
 
+        guard settings.reminderScheduleMode.isActive(at: date) else {
+            return nil
+        }
+
         let candidates = scheduledPetNeeds(for: date)
         return candidates.first { !fedPetNeedKeys().contains($0.key) }
     }
 
     private func scheduledPetNeeds(for date: Date) -> [PetNeed] {
+        guard settings.reminderScheduleMode.isActiveDay(date) else {
+            return []
+        }
+
         let calendar = Calendar.current
         let components = calendar.dateComponents([.year, .month, .day], from: date)
         guard
@@ -1435,9 +1704,22 @@ final class StatusCoordinator: NSObject {
     }
 
     private func waterTimes(year: Int, month: Int, day: Int) -> [(index: Int, date: Date)] {
-        let startMinute = 10 * 60
-        return (0..<10).compactMap { index in
-            dateOnDay(year: year, month: month, day: day, minuteOfDay: startMinute + index * 60).map { (index, $0) }
+        let slots = evenlySpacedMinutes(
+            count: 10,
+            startMinute: settings.reminderScheduleMode.startMinute,
+            endMinute: settings.reminderScheduleMode.endMinute
+        )
+        return slots.enumerated().compactMap { index, minuteOfDay in
+            dateOnDay(year: year, month: month, day: day, minuteOfDay: minuteOfDay).map { (index, $0) }
+        }
+    }
+
+    private func evenlySpacedMinutes(count: Int, startMinute: Int, endMinute: Int) -> [Int] {
+        guard count > 1 else { return [startMinute] }
+        let lastMinute = max(startMinute, endMinute - 60)
+        let span = max(0, lastMinute - startMinute)
+        return (0..<count).map { index in
+            startMinute + Int(round(Double(span) * Double(index) / Double(count - 1)))
         }
     }
 
@@ -1476,6 +1758,9 @@ final class StatusCoordinator: NSObject {
     }
 
     private func showHungryToastIfNeeded(for need: PetNeed?) {
+        guard settings.easterEggRemindersEnabled else {
+            return
+        }
         guard let need else {
             return
         }
@@ -1520,10 +1805,12 @@ final class StatusCoordinator: NSObject {
     }
 
     private func showDailyAmbientToastsIfNeeded(at date: Date) {
-        guard settings.popupRemindersEnabled else {
+        guard settings.popupRemindersEnabled,
+              settings.easterEggRemindersEnabled,
+              !settings.areRemindersDisabledToday else {
             return
         }
-        guard session.mode == .idle, !popover.isShown, !reminderToast.isShown else {
+        guard session.mode == .idle, !popover.isShown, !actionPopover.isShown, !reminderToast.isShown else {
             return
         }
 
@@ -1531,7 +1818,7 @@ final class StatusCoordinator: NSObject {
             return
         }
 
-        guard isWeekday(date) else { return }
+        guard settings.reminderScheduleMode.isActive(at: date) else { return }
         guard activePetNeed(at: date) == nil else { return }
         if showWalkToastIfNeeded(at: date) {
             return
@@ -1578,9 +1865,8 @@ final class StatusCoordinator: NSObject {
         at date: Date
     ) -> Bool {
         let minute = minuteOfDay(for: date)
-        let workStart = 10 * 60
-        let workEnd = 20 * 60
-        guard minute >= workStart && minute < workEnd else {
+        let workStart = settings.reminderScheduleMode.startMinute
+        guard settings.reminderScheduleMode.isActive(at: date) else {
             return false
         }
 
@@ -1632,18 +1918,17 @@ final class StatusCoordinator: NSObject {
 
     private func showWalkToastIfNeeded(at date: Date) -> Bool {
         let minute = minuteOfDay(for: date)
-        guard minute >= 10 * 60 && minute < 20 * 60 else {
+        guard settings.reminderScheduleMode.isActive(at: date) else {
             return false
         }
 
         let shown = Set(UserDefaults.standard.stringArray(forKey: walkToastStorageKey) ?? [])
         let day = dayKey(for: date)
-        let slotCount = ((20 * 60) - (10 * 60)) / 45
+        let walkSlots = settings.reminderScheduleMode.slotMinutes(interval: 45)
         var hasUnshownSlot = false
         var dueKeys: [String] = []
 
-        for slot in 0...slotCount {
-            let slotStart = 10 * 60 + slot * 45
+        for (slot, slotStart) in walkSlots.enumerated() {
             guard minute >= slotStart else { break }
             let key = "\(day).walk.\(slot)"
             dueKeys.append(key)
@@ -1718,11 +2003,6 @@ final class StatusCoordinator: NSObject {
         return startMinute + seed % range
     }
 
-    private func isWeekday(_ date: Date) -> Bool {
-        let weekday = Calendar.current.component(.weekday, from: date)
-        return weekday >= 2 && weekday <= 6
-    }
-
     private func dayKey(for date: Date) -> String {
         let components = Calendar.current.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", components.year ?? 0, components.month ?? 0, components.day ?? 0)
@@ -1746,12 +2026,12 @@ final class StatusCoordinator: NSObject {
         let convertedRect = window.convertToScreen(buttonRectInWindow)
         let windowRect = window.frame
 
-        if isReasonableStatusItemRect(windowRect) {
-            return windowRect
-        }
-
         if isReasonableStatusItemRect(convertedRect) {
             return convertedRect
+        }
+
+        if isReasonableStatusItemRect(windowRect) {
+            return windowRect
         }
 
         return nil
@@ -1876,7 +2156,13 @@ final class StatusCoordinator: NSObject {
         } else if let petNeedWiggleStartDate {
             let elapsed = Date().timeIntervalSince(petNeedWiggleStartDate)
             targetTilt = CGFloat(sin(elapsed * 2.8 * .pi)) * 15
-        } else if sleepStartDate != nil || wakingStartDate != nil || isPostWakeBlinking {
+        } else if session.isExerciseFlowActive
+            || sleepStartDate != nil
+            || wakingStartDate != nil
+            || isPostWakeBlinking
+            || isRiceFeeding
+            || feedingOverlayIcon != nil
+            || eatAnimationStartDate != nil {
             targetTilt = 0
         } else {
             targetTilt = isMouseHoveringStatusItem() ? 15 : 0
@@ -2051,11 +2337,15 @@ final class StatusCoordinator: NSObject {
         ProcessInfo.processInfo.environment["TOAST_DEMO_LOOP"] == "1"
     }
 
+    private var isFeedingOverlayDemoMode: Bool {
+        ProcessInfo.processInfo.environment["PET_FEEDING_OVERLAY_DEMO"] == "1"
+    }
+
     private var isAnyDemoMode: Bool {
         isToastDemoMode
             || isSleepDemoMode
+            || isFeedingOverlayDemoMode
             || ProcessInfo.processInfo.environment["PET_NEED_DEMO_SEQUENCE"] == "1"
-            || ProcessInfo.processInfo.environment["PET_NEED_OVERLAY_TEST_ICON"] == "1"
     }
 
     private func isMouseHoveringPetNeedStatusItem() -> Bool {
@@ -2113,8 +2403,20 @@ final class StatusCoordinator: NSObject {
             expressionYOffset: eatingEyeYOffset(),
             sleepProgress: sleepProgress(),
             wakeProgress: wakeProgress(),
-            verticalOffset: wakeJoltYOffset()
+            verticalOffset: wakeJoltYOffset(),
+            feedingOverlayIcon: feedingOverlayIcon,
+            feedingOverlayProgress: feedingOverlayProgress()
         )
+    }
+
+    private var feedingOverlayDuration: TimeInterval {
+        1.05
+    }
+
+    private func feedingOverlayProgress() -> CGFloat {
+        guard let feedingOverlayStartDate else { return 0 }
+        let elapsed = Date().timeIntervalSince(feedingOverlayStartDate)
+        return CGFloat(max(0, min(1, elapsed / feedingOverlayDuration)))
     }
 
     private func eatAnimationScale() -> CGFloat {
@@ -2194,7 +2496,171 @@ final class StatusCoordinator: NSObject {
 extension StatusCoordinator: NSPopoverDelegate {
     func popoverDidClose(_ notification: Notification) {
         DispatchQueue.main.async { [weak self] in
+            if notification.object as? NSPopover === self?.actionPopover {
+                self?.activeToast = nil
+            }
             self?.showNextPendingToastIfPossible()
         }
+    }
+}
+
+private final class CheckInMenuHeaderView: NSView {
+    private let summary: DailyCheckInSummary
+
+    init(summary: DailyCheckInSummary) {
+        self.summary = summary
+        super.init(frame: CGRect(x: 0, y: 0, width: 280, height: 86))
+        wantsLayer = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        let left: CGFloat = 18
+        let muted = NSColor.secondaryLabelColor
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: muted
+        ]
+        "今日打卡 \(summary.todayCount)/\(summary.totalCount)".draw(
+            at: CGPoint(x: left, y: 59),
+            withAttributes: titleAttributes
+        )
+
+        let dotRadius: CGFloat = 4
+        let dotGap: CGFloat = 4
+        var dotX = left + dotRadius
+        let dotY: CGFloat = 39
+        for completed in summary.completedSlots {
+            (completed ? NSColor.systemGreen : NSColor.tertiaryLabelColor).setFill()
+            NSBezierPath(
+                ovalIn: CGRect(
+                    x: dotX - dotRadius,
+                    y: dotY - dotRadius,
+                    width: dotRadius * 2,
+                    height: dotRadius * 2
+                )
+            ).fill()
+            dotX += dotRadius * 2 + dotGap
+        }
+
+        let comparisonAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+            .foregroundColor: muted
+        ]
+        summary.comparisonText.draw(
+            at: CGPoint(x: left, y: 13),
+            withAttributes: comparisonAttributes
+        )
+    }
+}
+
+private final class VersionMenuItemView: NSView {
+    private let version: String
+    private let updateVersion: String
+    private let action: () -> Void
+    private var isHovering = false
+
+    init(version: String, updateVersion: String, action: @escaping () -> Void) {
+        self.version = version
+        self.updateVersion = updateVersion
+        self.action = action
+        super.init(frame: CGRect(x: 0, y: 0, width: 280, height: 26))
+        wantsLayer = true
+        setAccessibilityLabel("版本 \(version)，有新版本 \(updateVersion)")
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovering = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovering = false
+        needsDisplay = true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        enclosingMenuItem?.menu?.cancelTracking()
+        DispatchQueue.main.async { [action] in
+            action()
+        }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        if isHovering {
+            NSColor.controlAccentColor.withAlphaComponent(0.16).setFill()
+            NSBezierPath(rect: bounds).fill()
+        }
+
+        let text = "版本 \(version)"
+        let textAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.menuFont(ofSize: 0),
+            .foregroundColor: isHovering ? NSColor.selectedMenuItemTextColor : NSColor.labelColor
+        ]
+        let textSize = text.size(withAttributes: textAttributes)
+        let textPoint = CGPoint(x: 18, y: (bounds.height - textSize.height) / 2)
+        text.draw(at: textPoint, withAttributes: textAttributes)
+
+        let arrowText = "›"
+        let arrowAttributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 22, weight: .semibold),
+            .foregroundColor: isHovering ? NSColor.selectedMenuItemTextColor : NSColor.secondaryLabelColor
+        ]
+        let arrowSize = arrowText.size(withAttributes: arrowAttributes)
+        let arrowPoint = CGPoint(
+            x: bounds.width - arrowSize.width - 18,
+            y: (bounds.height - arrowSize.height) / 2 - 1
+        )
+        arrowText.draw(at: arrowPoint, withAttributes: arrowAttributes)
+
+        let badgeText = "更新"
+        let badgeFont = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        let badgeAttributes: [NSAttributedString.Key: Any] = [
+            .font: badgeFont,
+            .foregroundColor: NSColor.white
+        ]
+        let badgeTextSize = badgeText.size(withAttributes: badgeAttributes)
+        let badgeWidth = max(34, badgeTextSize.width + 14)
+        let badgeHeight: CGFloat = 18
+        let badgeX = arrowPoint.x - badgeWidth - 10
+        let badgeRect = CGRect(
+            x: badgeX,
+            y: (bounds.height - badgeHeight) / 2,
+            width: badgeWidth,
+            height: badgeHeight
+        )
+
+        NSColor.systemRed.setFill()
+        NSBezierPath(roundedRect: badgeRect, xRadius: 9, yRadius: 9).fill()
+
+        let badgePoint = CGPoint(
+            x: badgeRect.midX - badgeTextSize.width / 2,
+            y: badgeRect.midY - badgeTextSize.height / 2
+        )
+        badgeText.draw(at: badgePoint, withAttributes: badgeAttributes)
     }
 }

@@ -66,24 +66,6 @@ Package the DMG:
 ./scripts/package_app.sh
 ```
 
-## Windows 版 / Windows Version
-
-Windows 托盘版源码位于：
-
-Windows tray app source:
-
-```text
-windows/KikuKegel.Windows
-```
-
-在 Windows 上安装 .NET 8 SDK 后运行：
-
-After installing .NET 8 SDK on Windows:
-
-```powershell
-.\scripts\package_windows.ps1
-```
-
 ## 隐私 / Privacy
 
 当前版本不需要账号，打卡和宠物状态数据保存在本机。

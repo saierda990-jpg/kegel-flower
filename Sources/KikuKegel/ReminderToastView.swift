@@ -16,15 +16,19 @@ struct ReminderToastView: View {
     let primaryAction: (() -> Void)?
     let secondaryButtonTitle: String?
     let secondaryAction: (() -> Void)?
+    var showsArrow: Bool = true
 
     var body: some View {
         VStack(spacing: 0) {
-            toastArrow
-                .offset(y: 1)
+            if showsArrow {
+                Color.clear
+                    .frame(width: arrowSize.width, height: arrowSize.height)
+            }
 
             contentBody
         }
         .contentShape(Rectangle())
+        .background(Color.clear)
         .onTapGesture {
             if primaryButtonTitle == nil {
                 action?()
@@ -73,6 +77,7 @@ struct ReminderToastView: View {
                             .font(.system(size: 11, weight: .semibold))
                     }
                     .buttonStyle(.borderedProminent)
+                    .tint(.blue)
                     .controlSize(.mini)
 
                     if let secondaryButtonTitle {
@@ -91,9 +96,6 @@ struct ReminderToastView: View {
         .padding(.horizontal, primaryButtonTitle == nil ? 10 : 13)
         .padding(.vertical, primaryButtonTitle == nil ? 5 : 11)
         .frame(width: bodyWidth, height: bodyHeight)
-        .background(toastMaterial(cornerRadius: primaryButtonTitle == nil ? 16 : 18))
-        .overlay(toastBorder(cornerRadius: primaryButtonTitle == nil ? 16 : 18))
-        .shadow(color: Color.black.opacity(0.18), radius: 10, x: 0, y: 5)
     }
 
     private var petActionBody: some View {
@@ -109,9 +111,14 @@ struct ReminderToastView: View {
                 } label: {
                     Text(primaryButtonTitle)
                         .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(.white)
                         .frame(width: 62, height: 24)
+                        .background(
+                            Capsule(style: .continuous)
+                                .fill(Color.accentColor)
+                        )
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.plain)
                 .controlSize(.small)
             }
         }
@@ -119,39 +126,20 @@ struct ReminderToastView: View {
         .padding(.top, 14)
         .padding(.bottom, 12)
         .frame(width: bodyWidth, height: bodyHeight)
-        .background(toastMaterial(cornerRadius: 19))
-        .overlay(toastBorder(cornerRadius: 19))
-        .shadow(color: Color.black.opacity(0.18), radius: 10, x: 0, y: 5)
     }
 
-    private var toastArrow: some View {
-        let size = CGSize(
-            width: primaryButtonTitle == nil ? 13 : 17,
-            height: primaryButtonTitle == nil ? 6 : 9
-        )
-
-        return ToastArrow()
-            .fill(.regularMaterial)
-            .overlay(ToastArrow().fill(Color.primary.opacity(0.035)))
-        .frame(width: size.width, height: size.height)
-        .overlay(
-            ToastArrow()
-                .stroke(Color.primary.opacity(0.18), lineWidth: 0.8)
+    var arrowSize: CGSize {
+        CGSize(
+            width: primaryButtonTitle == nil ? 7 : 9,
+            height: primaryButtonTitle == nil ? 3 : 5
         )
     }
 
-    private func toastMaterial(cornerRadius: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .fill(.regularMaterial)
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(Color.primary.opacity(0.035))
-            )
-    }
-
-    private func toastBorder(cornerRadius: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .stroke(Color.primary.opacity(0.18), lineWidth: 0.8)
+    var bodyCornerRadius: CGFloat {
+        if layout == .petAction {
+            return 19
+        }
+        return primaryButtonTitle == nil ? 16 : 18
     }
 
     private var bodyHeight: CGFloat {
@@ -180,16 +168,5 @@ struct ReminderToastView: View {
 
     private var standardTitleFontSize: CGFloat {
         primaryButtonTitle == nil && subtitle.isEmpty ? 18 : (primaryButtonTitle == nil ? 11 : 13)
-    }
-}
-
-private struct ToastArrow: Shape {
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
-        path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
-        path.closeSubpath()
-        return path
     }
 }

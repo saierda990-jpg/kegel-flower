@@ -3,6 +3,7 @@ import SwiftUI
 struct ExercisePopoverView: View {
     @ObservedObject var session: KegelSession
     @ObservedObject var petStatusStore: PetStatusStore
+    @ObservedObject var noticeStore: PopoverNoticeStore
     let iconStyle: () -> FlowerIconStyle
     let petStatus: () -> PetStatusSnapshot
     let startNow: () -> Void
@@ -22,17 +23,21 @@ struct ExercisePopoverView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 12) {
-                tabSwitch
+                if let notice = noticeStore.notice {
+                    popoverNoticeContent(notice)
+                } else {
+                    tabSwitch
 
-                Group {
-                    switch selectedTab {
-                    case .kegel:
-                        kegelContent
-                    case .pet:
-                        petContent
+                    Group {
+                        switch selectedTab {
+                        case .kegel:
+                            kegelContent
+                        case .pet:
+                            petContent
+                        }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
             .padding(.horizontal, 18)
             .padding(.top, 14)
@@ -45,6 +50,63 @@ struct ExercisePopoverView: View {
         .onReceive(refreshTimer) { date in
             refreshDate = date
         }
+    }
+
+    private func popoverNoticeContent(_ notice: PopoverActionNotice) -> some View {
+        VStack(spacing: 14) {
+            Spacer(minLength: 0)
+
+            if notice.layout == .petAction {
+                Text(notice.title)
+                    .font(.system(size: 40))
+                    .frame(height: 48)
+            } else {
+                HStack(spacing: 8) {
+                    if let systemImageName = notice.systemImageName {
+                        Image(systemName: systemImageName)
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    VStack(spacing: 4) {
+                        Text(notice.title)
+                            .font(.system(size: 19, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.center)
+                        if !notice.subtitle.isEmpty {
+                            Text(notice.subtitle)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.center)
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 10) {
+                if let primaryButtonTitle = notice.primaryButtonTitle {
+                    Button(primaryButtonTitle) {
+                        notice.primaryAction?()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.regular)
+                    .keyboardShortcut(.defaultAction)
+                }
+
+                if let secondaryButtonTitle = notice.secondaryButtonTitle {
+                    Button(secondaryButtonTitle) {
+                        notice.secondaryAction?()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.regular)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var pixelScreenBackground: some View {
@@ -81,41 +143,75 @@ struct ExercisePopoverView: View {
     }
 
     private var kegelContent: some View {
+        VStack(spacing: 0) {
+            kegelMainCanvas
+                .frame(height: 122, alignment: .top)
+
+            Spacer(minLength: 0)
+
+            if session.mode != .preparing && session.mode != .completing {
+                kegelActionButtons
+                    .frame(height: 34, alignment: .bottom)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private var kegelMainCanvas: some View {
+        Group {
+            if session.mode == .exercising {
+                compactExerciseCanvas
+            } else {
+                defaultKegelCanvas
+            }
+        }
+    }
+
+    private var defaultKegelCanvas: some View {
         VStack(spacing: 16) {
             kegelHeader
 
-            if session.mode == .exercising {
-                exerciseProgress
-            } else if session.mode == .preparing || session.mode == .completing {
+            if session.mode == .preparing || session.mode == .completing {
                 Text(session.mode == .preparing ? "准备跟随节奏。" : "本次练习已完成。")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: 22, alignment: .topLeading)
             } else {
                 Text(nextReminderText)
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(height: 22, alignment: .topLeading)
             }
+        }
+    }
 
-            if session.mode != .preparing && session.mode != .completing {
-                HStack(spacing: 10) {
-                    Button(primaryButtonTitle) {
-                        startNow()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.regular)
-                    .keyboardShortcut(.defaultAction)
+    private var compactExerciseCanvas: some View {
+        VStack(spacing: 10) {
+            kegelHeader
+                .frame(height: 64, alignment: .center)
 
-                    Button("稍后") {
-                        snooze()
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.regular)
+            exerciseProgress
+        }
+    }
 
-                    Spacer()
-                }
+    private var kegelActionButtons: some View {
+        HStack(spacing: 10) {
+            Button(primaryButtonTitle) {
+                startNow()
             }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .keyboardShortcut(.defaultAction)
+
+            Button("稍后") {
+                snooze()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+
+            Spacer()
         }
     }
 
@@ -129,16 +225,16 @@ struct ExercisePopoverView: View {
                     phase: session.phase,
                     isAnimating: session.mode == .exercising
                 )
-                .padding(16)
+                .padding(kegelMarkPadding)
             }
-            .frame(width: 82, height: 82)
+            .frame(width: kegelIconSize, height: kegelIconSize)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(title)
-                    .font(.system(size: 19, weight: .semibold))
+                    .font(.system(size: kegelTitleSize, weight: .semibold))
                     .foregroundStyle(.primary)
                 Text(subtitle)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: kegelSubtitleSize, weight: .semibold))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -148,7 +244,7 @@ struct ExercisePopoverView: View {
     }
 
     private var exerciseProgress: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 10) {
             GradientProgressBar(
                 value: progress,
                 colors: [
@@ -167,6 +263,7 @@ struct ExercisePopoverView: View {
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(.secondary)
         }
+        .frame(height: 48, alignment: .top)
     }
 
     private var petContent: some View {
@@ -266,7 +363,8 @@ struct ExercisePopoverView: View {
     private var subtitle: String {
         switch session.mode {
         case .idle:
-            return "默认每 45 分钟提醒一次。"
+            let minutes = Int(session.timing.reminderInterval / 60)
+            return "每 \(minutes) 分钟提醒一次。"
         case .reminding:
             return "点击开始后，跟着小花的节奏收缩和放松。"
         case .preparing:
@@ -282,9 +380,25 @@ struct ExercisePopoverView: View {
         session.mode == .exercising ? "重新开始" : "开始"
     }
 
+    private var kegelIconSize: CGFloat {
+        session.mode == .exercising ? 64 : 82
+    }
+
+    private var kegelMarkPadding: CGFloat {
+        session.mode == .exercising ? 14 : 16
+    }
+
+    private var kegelTitleSize: CGFloat {
+        session.mode == .exercising ? 17 : 19
+    }
+
+    private var kegelSubtitleSize: CGFloat {
+        session.mode == .exercising ? 12 : 13
+    }
+
     private var nextReminderText: String {
         let minutes = max(1, Int(ceil(session.nextReminderAt.timeIntervalSince(refreshDate) / 60)))
-        return "大约 \(minutes) 分钟后提醒。"
+        return "\(minutes) 分钟后提醒。"
     }
 
     private var progress: Double {

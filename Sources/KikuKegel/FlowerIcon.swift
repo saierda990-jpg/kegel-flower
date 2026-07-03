@@ -29,7 +29,9 @@ enum FlowerIcon {
         expressionYOffset: CGFloat = 0,
         sleepProgress: CGFloat = 0,
         wakeProgress: CGFloat = 0,
-        verticalOffset: CGFloat = 0
+        verticalOffset: CGFloat = 0,
+        feedingOverlayIcon: String? = nil,
+        feedingOverlayProgress: CGFloat = 0
     ) -> NSImage {
         let size = NSSize(width: 18, height: 18)
         let image = NSImage(size: size)
@@ -78,10 +80,18 @@ enum FlowerIcon {
             )
         }
 
+        if let feedingOverlayIcon {
+            drawFeedingOverlay(
+                icon: feedingOverlayIcon,
+                progress: feedingOverlayProgress,
+                size: size
+            )
+        }
+
         NSGraphicsContext.restoreGraphicsState()
 
         image.unlockFocus()
-        image.isTemplate = true
+        image.isTemplate = feedingOverlayIcon == nil
         return image
     }
 
@@ -325,6 +335,42 @@ enum FlowerIcon {
             path.line(to: CGPoint(x: center.x + 5.25, y: center.y + 1.25 + zRise))
             path.stroke()
         }
+    }
+
+    private static func drawFeedingOverlay(icon: String, progress: CGFloat, size: NSSize) {
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        let clamped = max(0, min(1, progress))
+        let shrinkStart: CGFloat = 0.38
+        let rawShrink = max(0, min(1, (clamped - shrinkStart) / (1 - shrinkStart)))
+        let eased = 1 - pow(1 - rawShrink, 3)
+        let overlayScale = max(0.01, 1 - eased)
+        let target = CGPoint(x: center.x, y: center.y - 1.25)
+        let currentCenter = CGPoint(
+            x: center.x + (target.x - center.x) * eased,
+            y: center.y + (target.y - center.y) * eased
+        )
+        let maxSide = min(size.width, size.height) - 1.8
+        let side = maxSide * overlayScale
+
+        guard side > 0.2 else { return }
+
+        let rect = CGRect(
+            x: currentCenter.x - side / 2,
+            y: currentCenter.y - side / 2,
+            width: side,
+            height: side
+        )
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: max(1, side * 0.88)),
+            .paragraphStyle: paragraph
+        ]
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current?.compositingOperation = .sourceOver
+        (icon as NSString).draw(in: rect, withAttributes: attributes)
+        NSGraphicsContext.restoreGraphicsState()
     }
 
     private static func withClearFaceScale(size: NSSize, tiltDegrees: CGFloat, scale: CGFloat, draw: () -> Void) {

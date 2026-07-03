@@ -30,7 +30,8 @@ final class KegelSession: ObservableObject {
     @Published private(set) var nextReminderAt: Date
     @Published private(set) var transitionText: String = ""
 
-    let timing = KegelTiming()
+    private(set) var timing = KegelTiming()
+    var scheduleMode: ReminderScheduleMode = .weekdays
 
     var onReminder: (() -> Void)?
     var onTick: (() -> Void)?
@@ -83,7 +84,24 @@ final class KegelSession: ObservableObject {
         restoreOrScheduleNextReminder()
     }
 
+    func applyScheduleMode(_ mode: ReminderScheduleMode) {
+        scheduleMode = mode
+        guard self.mode == .idle || self.mode == .reminding else { return }
+        restoreOrScheduleNextReminder()
+    }
+
+    func applyReminderInterval(_ interval: KegelReminderInterval) {
+        timing.reminderInterval = interval.timeInterval
+        guard mode == .idle || mode == .reminding else { return }
+        scheduleNextReminder(from: Date())
+    }
+
     func triggerReminderNow() {
+        guard scheduleMode.isActive(at: Date()) else {
+            scheduleNextReminder(from: Date().addingTimeInterval(-timing.reminderInterval))
+            return
+        }
+
         reminderTimer?.invalidate()
         reminderTimer = nil
         mode = .reminding
@@ -119,6 +137,26 @@ final class KegelSession: ObservableObject {
         mode = .idle
         transitionText = ""
         scheduleNextReminder(from: Date().addingTimeInterval(TimeInterval(minutes * 60) - timing.reminderInterval))
+        onTick?()
+    }
+
+    func pauseReminders(until date: Date) {
+        reminderTimer?.invalidate()
+        reminderTimer = nil
+        transitionTimer?.invalidate()
+        transitionTimer = nil
+        exerciseTimer?.invalidate()
+        exerciseTimer = nil
+        mode = .idle
+        transitionText = ""
+        nextReminderAt = date
+        persistNextReminderAt()
+        let delay = max(1, date.timeIntervalSinceNow)
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            self?.triggerReminderNow()
+        }
+        reminderTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
         onTick?()
     }
 
@@ -177,7 +215,7 @@ final class KegelSession: ObservableObject {
 
     private func scheduleNextReminder(from date: Date) {
         reminderTimer?.invalidate()
-        let target = date.addingTimeInterval(timing.reminderInterval)
+        let target = scheduleMode.nextReminderDate(after: date, interval: timing.reminderInterval)
         nextReminderAt = target
         persistNextReminderAt()
         let delay = max(1, target.timeIntervalSinceNow)
@@ -191,6 +229,11 @@ final class KegelSession: ObservableObject {
 
     private func restoreOrScheduleNextReminder() {
         reminderTimer?.invalidate()
+        if !scheduleMode.isActive(at: Date()), nextReminderAt <= Date() {
+            scheduleNextReminder(from: Date().addingTimeInterval(-timing.reminderInterval))
+            return
+        }
+
         if nextReminderAt <= Date() {
             triggerReminderNow()
             return

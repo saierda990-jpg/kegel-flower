@@ -114,6 +114,7 @@ final class PetStatusStore: ObservableObject {
     private let storageKey = "PetStatus.v1"
     private let defaults: UserDefaults
     private var state: State
+    var scheduleMode: ReminderScheduleMode = .weekdays
 
     private let feedSlotCount = 5
     private let drinkSlotCount = 10
@@ -125,6 +126,11 @@ final class PetStatusStore: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.state = Self.loadState(from: defaults, key: storageKey)
+    }
+
+    func applyScheduleMode(_ mode: ReminderScheduleMode) {
+        scheduleMode = mode
+        revision += 1
     }
 
     func recordExercise(at date: Date = Date()) {
@@ -185,7 +191,11 @@ final class PetStatusStore: ObservableObject {
         return result
     }
 
-    func snapshot(todayExerciseCount: Int, at date: Date = Date()) -> PetStatusSnapshot {
+    func snapshot(
+        todayExerciseCount: Int,
+        exerciseSlotCount: Int,
+        at date: Date = Date()
+    ) -> PetStatusSnapshot {
         updateWellnessTracking(at: date)
 
         let fullness = feedProgress(at: date)
@@ -193,9 +203,9 @@ final class PetStatusStore: ObservableObject {
         let energy = dailyProgress(kind: .rest, at: date)
         let toilet = dailyProgress(kind: .toilet, at: date)
         let drinkCompleted = completedSlots(kind: .drink, dayKey: dayKey(for: date)).count
-        let suggestedDrinkML = drinkSlotCount * 200
-        let completedDrinkML = min(drinkSlotCount, drinkCompleted) * 200
-        let exercise = min(1, Double(todayExerciseCount) / Double(DailyCheckInStore.slotCount))
+        let suggestedDrinkML = slotCount(kind: .drink) * 200
+        let completedDrinkML = min(slotCount(kind: .drink), drinkCompleted) * 200
+        let exercise = min(1, Double(todayExerciseCount) / Double(max(1, exerciseSlotCount)))
         let wellnessSeconds = effectiveWellnessSeconds(at: date)
         let experience = state.exerciseCount * 18
             + state.feedCount * 3
@@ -216,7 +226,7 @@ final class PetStatusStore: ObservableObject {
             toiletHint: nextCareText(kind: .toilet, at: date),
             activityHint: nextCareText(kind: .rest, at: date),
             hydrationDetail: "\(completedDrinkML)/\(suggestedDrinkML)ml",
-            exerciseDetail: "\(todayExerciseCount)/\(DailyCheckInStore.slotCount)",
+            exerciseDetail: "\(todayExerciseCount)/\(exerciseSlotCount)",
             level: level,
             experience: experience,
             moodText: moodText(for: average)
@@ -394,12 +404,23 @@ final class PetStatusStore: ObservableObject {
         switch kind {
         case .feed:
             return [10 * 60, 11 * 60 + 30, 14 * 60 + 45, 17 * 60 + 30, 19 * 60 + 30]
+                .filter { $0 >= scheduleMode.startMinute && $0 < scheduleMode.endMinute }
         case .drink:
-            return (0..<drinkSlotCount).map { 10 * 60 + $0 * 60 }
+            return evenlySpacedSlots(count: drinkSlotCount)
         case .rest:
-            return (0..<restSlotCount).map { 10 * 60 + $0 * 45 }
+            return scheduleMode.slotMinutes(interval: 45)
         case .toilet:
-            return [10 * 60, 12 * 60, 14 * 60, 16 * 60, 18 * 60]
+            return scheduleMode.slotMinutes(interval: 120)
+        }
+    }
+
+    private func evenlySpacedSlots(count: Int) -> [Int] {
+        guard count > 1 else { return [scheduleMode.startMinute] }
+        let start = scheduleMode.startMinute
+        let last = max(start, scheduleMode.endMinute - 60)
+        let span = max(0, last - start)
+        return (0..<count).map { index in
+            start + Int(round(Double(span) * Double(index) / Double(count - 1)))
         }
     }
 
@@ -425,13 +446,13 @@ final class PetStatusStore: ObservableObject {
     private func slotCount(kind: CareKind) -> Int {
         switch kind {
         case .feed:
-            return feedSlotCount
+            return slotMinutes(kind: .feed).count
         case .drink:
-            return drinkSlotCount
+            return slotMinutes(kind: .drink).count
         case .rest:
-            return restSlotCount
+            return slotMinutes(kind: .rest).count
         case .toilet:
-            return toiletSlotCount
+            return slotMinutes(kind: .toilet).count
         }
     }
 
