@@ -76,8 +76,7 @@ struct ReminderToastView: View {
                         Text(primaryButtonTitle)
                             .font(.system(size: 11, weight: .semibold))
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.blue)
+                    .buttonStyle(.bordered)
                     .controlSize(.mini)
 
                     if let secondaryButtonTitle {
@@ -111,11 +110,11 @@ struct ReminderToastView: View {
                 } label: {
                     Text(primaryButtonTitle)
                         .font(.system(size: 12.5, weight: .semibold))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.primary)
                         .frame(width: 62, height: 24)
                         .background(
                             Capsule(style: .continuous)
-                                .fill(Color.accentColor)
+                                .fill(Color.white.opacity(0.14))
                         )
                 }
                 .buttonStyle(.plain)

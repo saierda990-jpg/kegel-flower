@@ -478,9 +478,23 @@ final class StatusCoordinator: NSObject {
             actionPopover.close()
             pauseVisibleToastForPopover()
             NSApp.activate(ignoringOtherApps: true)
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            popover.show(relativeTo: popoverAnchorRect(in: button), of: button, preferredEdge: .minY)
             applyNativePopoverChrome(to: popover)
         }
+    }
+
+    private func popoverAnchorRect(in button: NSStatusBarButton) -> CGRect {
+        guard !session.shortStatusText.isEmpty else {
+            return button.bounds
+        }
+
+        let iconWidth = min(compactStatusItemLength, button.bounds.width)
+        return CGRect(
+            x: button.bounds.minX,
+            y: button.bounds.minY,
+            width: iconWidth,
+            height: button.bounds.height
+        )
     }
 
     private func showContextMenu() {
@@ -499,7 +513,7 @@ final class StatusCoordinator: NSObject {
         snooze.target = self
         menu.addItem(snooze)
 
-        let disableToday = NSMenuItem(title: "今天不再提醒", action: #selector(disableRemindersForTodayFromMenu), keyEquivalent: "")
+        let disableToday = NSMenuItem(title: "今天不再提醒", action: #selector(toggleRemindersForTodayFromMenu), keyEquivalent: "")
         disableToday.target = self
         disableToday.state = settings.areRemindersDisabledToday ? .on : .off
         menu.addItem(disableToday)
@@ -655,8 +669,16 @@ final class StatusCoordinator: NSObject {
 
     @objc private func startNowFromMenu() {
         beginExerciseFromUser()
-        if !popover.isShown {
-            togglePopover()
+        showPopoverAfterMenuActionSettles()
+    }
+
+    private func showPopoverAfterMenuActionSettles() {
+        DispatchQueue.main.async { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+                guard let self, !self.popover.isShown else { return }
+                self.refreshStatusText()
+                self.togglePopover()
+            }
         }
     }
 
@@ -667,7 +689,15 @@ final class StatusCoordinator: NSObject {
         session.snooze(minutes: 10)
     }
 
-    @objc private func disableRemindersForTodayFromMenu() {
+    @objc private func toggleRemindersForTodayFromMenu() {
+        if settings.areRemindersDisabledToday {
+            settings.enableRemindersForToday()
+            applyReminderSettings()
+            wakeFromSleep()
+            refreshStatusText()
+            return
+        }
+
         settings.disableRemindersForToday()
         clearPendingToasts()
         hideReminderToast()
@@ -682,6 +712,7 @@ final class StatusCoordinator: NSObject {
         )
         session.pauseReminders(until: nextActiveStart)
         refreshStatusText()
+        enterTodayPauseSleepIfPossible()
     }
 
     private func snoozeFromPopover() {
@@ -1143,7 +1174,7 @@ final class StatusCoordinator: NSObject {
 
         NSApp.activate(ignoringOtherApps: true)
         if !actionPopover.isShown {
-            actionPopover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            actionPopover.show(relativeTo: popoverAnchorRect(in: button), of: button, preferredEdge: .minY)
             applyNativePopoverChrome(to: actionPopover)
         }
     }
@@ -1281,7 +1312,7 @@ final class StatusCoordinator: NSObject {
     }
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.7"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.8"
     }
 
     private func refreshCachedUpdateInfo() {
@@ -2218,6 +2249,11 @@ final class StatusCoordinator: NSObject {
             return
         }
 
+        if settings.areRemindersDisabledToday {
+            enterTodayPauseSleepIfPossible(now: now)
+            return
+        }
+
         if isLunchNapTime(now) {
             if sleepStartDate == nil && wakingStartDate == nil {
                 sleepStartDate = now
@@ -2275,6 +2311,14 @@ final class StatusCoordinator: NSObject {
             && !reminderToast.isShown
     }
 
+    private func enterTodayPauseSleepIfPossible(now: Date = Date()) {
+        guard settings.areRemindersDisabledToday, canSleep else { return }
+        guard !isMouseHoveringStatusItem() else { return }
+        guard sleepStartDate == nil, wakingStartDate == nil else { return }
+        sleepStartDate = now
+        sleepEndDate = nil
+    }
+
     private func wakeFromSleep() {
         guard sleepStartDate != nil else { return }
         sleepEndDate = nil
@@ -2294,6 +2338,9 @@ final class StatusCoordinator: NSObject {
         triggerBlink()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.32) { [weak self] in
             self?.triggerBlink()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.72) { [weak self] in
+            self?.enterTodayPauseSleepIfPossible()
         }
         scheduleNextSleep()
     }
