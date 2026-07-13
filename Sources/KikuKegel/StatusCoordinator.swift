@@ -717,6 +717,11 @@ final class StatusCoordinator: NSObject {
 
     private func snoozeFromPopover() {
         hideReminderToast()
+        guard PopoverSnoozeBehavior.shouldReschedule(for: session.mode) else {
+            popover.close()
+            return
+        }
+
         nextPetNeedToastAllowedAt = Date().addingTimeInterval(45)
         nextAmbientToastAllowedAt = Date().addingTimeInterval(90)
         session.snooze(minutes: 10)
@@ -1312,7 +1317,7 @@ final class StatusCoordinator: NSObject {
     }
 
     private var appVersion: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.8"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.2.9"
     }
 
     private func refreshCachedUpdateInfo() {
@@ -1340,9 +1345,9 @@ final class StatusCoordinator: NSObject {
         }
 
         updateAvailableInfo = AppUpdateInfo(
-            version: "0.2.8",
+            version: "0.2.9",
             url: URL(string: "https://github.com/saierda990-jpg/kegel-flower/releases")!,
-            title: "v0.2.8",
+            title: "v0.2.9",
             notes: nil
         )
     }

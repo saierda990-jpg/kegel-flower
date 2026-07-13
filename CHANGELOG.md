@@ -1,5 +1,13 @@
 # Changelog / 更新日志
 
+## v0.2.9
+
+- Closing the popover before a reminder is due no longer resets the countdown.
+- Snooze now delays the next reminder by 10 minutes only after a reminder has fired.
+
+- 倒计时尚未结束时，关闭弹窗不再重置提醒时间。
+- 仅在到点提醒后点击“稍后”时，才会延后 10 分钟。
+
 ## v0.2.8
 
 - Fixed popover alignment when starting an exercise from the right-click menu.

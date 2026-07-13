@@ -8,6 +8,12 @@ enum ReminderMode: String {
     case completing
 }
 
+enum PopoverSnoozeBehavior {
+    static func shouldReschedule(for mode: ReminderMode) -> Bool {
+        mode == .reminding
+    }
+}
+
 enum KegelPhase: String {
     case contract = "收缩"
     case relax = "放松"
